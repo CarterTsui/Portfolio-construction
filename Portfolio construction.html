@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Portfolio Optimization with 10-Year Projections (Line Chart)</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+      max-width: 1200px;
+    }
+    .section {
+      margin-bottom: 20px;
+      padding: 15px;
+      border: 1px solid #ddd;
+    }
+    .section h2 {
+      margin-top: 0;
+    }
+    textarea {
+      width: 100%;
+      height: 150px;
+    }
+    table, th, td {
+      border: 1px solid #ccc;
+      border-collapse: collapse;
+      padding: 8px;
+      text-align: center;
+    }
+    th {
+      background-color: #f4f4f4;
+    }
+    .btn {
+      margin-top: 10px;
+      margin-bottom: 10px;
+      padding: 6px 12px;
+      border: 1px solid #999;
+      background-color: #eee;
+      cursor: pointer;
+    }
+    .btn:hover {
+      background-color: #ddd;
+    }
+    .output {
+      background: #f9f9f9;
+      padding: 10px;
+      margin-top: 10px;
+      white-space: pre-line;
+    }
+    #chartContainer {
+      width: 800px;
+      margin-top: 20px;
+    }
+    #chartCanvas, #chartCanvasUserProj, #chartCanvasOptimalProj {
+      width: 100%;
+      height: 400px;
+    }
+  </style>
+  <!-- Include Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <h1>Portfolio Optimization with 10-Year Projections (Line Chart)</h1>
+
+  <!-- SECTION 1: PASTE HISTORICAL RETURNS -->
+  <div class="section">
+    <h2>1. Paste Historical Returns (CSV-like)</h2>
+    <p>
+      Each row represents a time period and each column a stock.
+      <br>Example (for 3 stocks):
+      <pre>
+0.01, 0.02, -0.01
+0.03, 0.01, 0.00
+-0.01, 0.02, 0.01
+...
+      </pre>
+    </p>
+    <textarea id="returnsTextarea"></textarea>
+    <br />
+    <button class="btn" id="parseReturnsBtn">Parse Returns</button>
+  </div>
+
+  <!-- SECTION 2: DISPLAY STOCK STATISTICS -->
+  <div class="section" id="statsSection" style="display:none;">
+    <h2>2. Stock Statistics</h2>
+    <table id="stockStatsTable">
+      <thead>
+        <tr>
+          <th>Stock</th>
+          <th>Mean Return</th>
+          <th>Std Dev</th>
+          <th>Variance</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <h3>Covariance Matrix</h3>
+    <table id="covMatrixTable"></table>
+    <h3>Correlation Matrix</h3>
+    <table id="corrMatrixTable"></table>
+  </div>
+
+  <!-- SECTION 3: ENTER WEIGHTS -->
+  <div class="section" id="weightsSection" style="display:none;">
+    <h2>3. Portfolio Weights</h2>
+    <p>Paste a single comma-separated list of weights (e.g., for 3 stocks: <code>0.2, 0.3, 0.5</code>).</p>
+    <textarea id="weightsTextarea" style="height:50px;"></textarea>
+    <br />
+    <label>Risk-Free Rate (in same monthly units): <input type="number" id="riskFreeRate" value="0" step="0.001" /></label>
+    <br />
+    <button class="btn" id="calcPortfolioBtn">Calculate Portfolio Stats</button>
+    <div class="output" id="portfolioOutput"></div>
+    <!-- 10-Year Projection for the User Portfolio -->
+    <div id="chartContainer">
+      <canvas id="chartCanvasUserProj"></canvas>
+    </div>
+  </div>
+
+  <!-- SECTION 4: OPTIMIZATION & 10-YEAR PROJECTION FOR OPTIMAL PORTFOLIO -->
+  <div class="section" id="optimizationSection" style="display:none;">
+    <h2>4. Optimization (Random Search) & 10-Year Projections</h2>
+    <label for="numRandomPortfolios">Number of Random Portfolios:</label>
+    <input type="number" id="numRandomPortfolios" value="10000" />
+    <button class="btn" id="runOptimizationBtn">Run Optimization</button>
+    <div class="output" id="optimizationOutput"></div>
+    <!-- Scatter plot for Efficient Frontier -->
+    <div id="chartContainer">
+      <canvas id="chartCanvas"></canvas>
+    </div>
+    <!-- 10-Year Projection for the Max Sharpe Portfolio -->
+    <div id="chartContainer">
+      <canvas id="chartCanvasOptimalProj"></canvas>
+    </div>
+  </div>
+
+  <script>
+    // ---------------------------
+    // Global Data Structures
+    // ---------------------------
+    let returnsMatrix = [];   // 2D array: returnsMatrix[timeIndex][stockIndex]
+    let stockNames = [];
+    let meanReturns = [];
+    let stdDevs = [];
+    let variances = [];
+    let covMatrix = [];
+    let corrMatrix = [];
+
+    // Chart references
+    let frontierChart = null;
+    let userProjChart = null;
+    let optimalProjChart = null;
+
+    // HTML Elements
+    const returnsTextarea = document.getElementById('returnsTextarea');
+    const parseReturnsBtn = document.getElementById('parseReturnsBtn');
+    const statsSection = document.getElementById('statsSection');
+    const stockStatsTableBody = document.querySelector('#stockStatsTable tbody');
+    const covMatrixTable = document.getElementById('covMatrixTable');
+    const corrMatrixTable = document.getElementById('corrMatrixTable');
+
+    const weightsSection = document.getElementById('weightsSection');
+    const weightsTextarea = document.getElementById('weightsTextarea');
+    const calcPortfolioBtn = document.getElementById('calcPortfolioBtn');
+    const portfolioOutput = document.getElementById('portfolioOutput');
+    const riskFreeRateEl = document.getElementById('riskFreeRate');
+
+    const optimizationSection = document.getElementById('optimizationSection');
+    const numRandomPortfoliosEl = document.getElementById('numRandomPortfolios');
+    const runOptimizationBtn = document.getElementById('runOptimizationBtn');
+    const optimizationOutput = document.getElementById('optimizationOutput');
+
+    // ---------------------------
+    // 1) Parse Historical Returns
+    // ---------------------------
+    parseReturnsBtn.addEventListener('click', () => {
+      const raw = returnsTextarea.value.trim();
+      if (!raw) {
+        alert("Please paste CSV-like returns data first!");
+        return;
+      }
+      const lines = raw.split(/\r?\n/);
+      returnsMatrix = [];
+      lines.forEach(line => {
+        const values = line.split(',').map(v => parseFloat(v.trim()));
+        returnsMatrix.push(values);
+      });
+      // Verify consistent column count
+      const numCols = returnsMatrix[0].length;
+      for (let i = 1; i < returnsMatrix.length; i++) {
+        if (returnsMatrix[i].length !== numCols) {
+          alert(`Inconsistent columns at line ${i+1}`);
+          return;
+        }
+      }
+      // Create stock names
+      stockNames = [];
+      for (let i = 0; i < numCols; i++) {
+        stockNames.push("Stock " + (i+1));
+      }
+      computeStats();
+      computeCovCorr();
+      renderStats();
+      statsSection.style.display = 'block';
+      weightsSection.style.display = 'block';
+      optimizationSection.style.display = 'block';
+      portfolioOutput.innerHTML = "";
+      optimizationOutput.innerHTML = "";
+    });
+
+    function computeStats() {
+      const n = returnsMatrix.length;
+      const m = returnsMatrix[0].length;
+      meanReturns = new Array(m).fill(0);
+      stdDevs = new Array(m).fill(0);
+      variances = new Array(m).fill(0);
+      for (let j = 0; j < m; j++) {
+        let sum = 0;
+        for (let i = 0; i < n; i++) {
+          sum += returnsMatrix[i][j];
+        }
+        meanReturns[j] = sum / n;
+      }
+      for (let j = 0; j < m; j++) {
+        let sqDiffSum = 0;
+        for (let i = 0; i < n; i++) {
+          let diff = returnsMatrix[i][j] - meanReturns[j];
+          sqDiffSum += diff * diff;
+        }
+        let variance = sqDiffSum / (n - 1);
+        variances[j] = variance;
+        stdDevs[j] = Math.sqrt(variance);
+      }
+    }
+
+    function computeCovCorr() {
+      const n = returnsMatrix.length;
+      const m = returnsMatrix[0].length;
+      covMatrix = Array.from({ length: m }, () => new Array(m).fill(0));
+      corrMatrix = Array.from({ length: m }, () => new Array(m).fill(0));
+      for (let i = 0; i < m; i++) {
+        for (let j = i; j < m; j++) {
+          let sumCov = 0;
+          for (let k = 0; k < n; k++) {
+            sumCov += (returnsMatrix[k][i] - meanReturns[i]) * (returnsMatrix[k][j] - meanReturns[j]);
+          }
+          const cov = sumCov / (n - 1);
+          covMatrix[i][j] = cov;
+          covMatrix[j][i] = cov;
+          const denom = stdDevs[i] * stdDevs[j];
+          const corr = (denom === 0) ? 0 : cov / denom;
+          corrMatrix[i][j] = corr;
+          corrMatrix[j][i] = corr;
+        }
+      }
+    }
+
+    function renderStats() {
+      stockStatsTableBody.innerHTML = "";
+      covMatrixTable.innerHTML = "";
+      corrMatrixTable.innerHTML = "";
+      for (let j = 0; j < stockNames.length; j++) {
+        const row = document.createElement('tr');
+        let cellName = document.createElement('td');
+        cellName.textContent = stockNames[j];
+        row.appendChild(cellName);
+        let cellMean = document.createElement('td');
+        cellMean.textContent = meanReturns[j].toFixed(4);
+        row.appendChild(cellMean);
+        let cellStd = document.createElement('td');
+        cellStd.textContent = stdDevs[j].toFixed(4);
+        row.appendChild(cellStd);
+        let cellVar = document.createElement('td');
+        cellVar.textContent = variances[j].toFixed(6);
+        row.appendChild(cellVar);
+        stockStatsTableBody.appendChild(row);
+      }
+      // Covariance Matrix
+      const covHeader = document.createElement('tr');
+      covHeader.appendChild(document.createElement('th'));
+      for (let j = 0; j < stockNames.length; j++) {
+        const th = document.createElement('th');
+        th.textContent = stockNames[j];
+        covHeader.appendChild(th);
+      }
+      covMatrixTable.appendChild(covHeader);
+      for (let i = 0; i < stockNames.length; i++) {
+        const row = document.createElement('tr');
+        const rowHeader = document.createElement('th');
+        rowHeader.textContent = stockNames[i];
+        row.appendChild(rowHeader);
+        for (let j = 0; j < stockNames.length; j++) {
+          const cell = document.createElement('td');
+          cell.textContent = covMatrix[i][j].toFixed(6);
+          row.appendChild(cell);
+        }
+        covMatrixTable.appendChild(row);
+      }
+      // Correlation Matrix
+      const corrHeader = document.createElement('tr');
+      corrHeader.appendChild(document.createElement('th'));
+      for (let j = 0; j < stockNames.length; j++) {
+        const th = document.createElement('th');
+        th.textContent = stockNames[j];
+        corrHeader.appendChild(th);
+      }
+      corrMatrixTable.appendChild(corrHeader);
+      for (let i = 0; i < stockNames.length; i++) {
+        const row = document.createElement('tr');
+        const rowHeader = document.createElement('th');
+        rowHeader.textContent = stockNames[i];
+        row.appendChild(rowHeader);
+        for (let j = 0; j < stockNames.length; j++) {
+          const cell = document.createElement('td');
+          cell.textContent = corrMatrix[i][j].toFixed(4);
+          row.appendChild(cell);
+        }
+        corrMatrixTable.appendChild(row);
+      }
+    }
+
+    // ---------------------------
+    // 2) Calculate User Portfolio Stats & Run 10-Year Projection
+    // ---------------------------
+    calcPortfolioBtn.addEventListener('click', () => {
+      const weights = parseWeightsTextarea();
+      if (!weights) return;
+      const rf = parseFloat(riskFreeRateEl.value) || 0;
+      const pRet = portfolioReturn(weights);
+      const pVar = portfolioVariance(weights);
+      const pStd = Math.sqrt(pVar);
+      const sharpe = (pRet - rf) / (pStd || 1e-9);
+      let msg = `Portfolio Return: ${pRet.toFixed(4)}\n`;
+      msg += `Portfolio Std Dev: ${pStd.toFixed(4)}\n`;
+      msg += `Portfolio Variance: ${pVar.toFixed(6)}\n`;
+      msg += `Sharpe Ratio (rf=${rf}): ${sharpe.toFixed(4)}\n`;
+      portfolioOutput.textContent = msg;
+      // Run 10-year projection for the user portfolio
+      // For 10 years = 120 months; using the monthly pRet & pStd
+      const userProjection = runMonteCarlo10YearSimulation(1_000_000, pRet, pStd, 10000);
+      // Plot the projection as a line chart
+      if (userProjChart) userProjChart.destroy();
+      userProjChart = plotProjectionLineChart(userProjection, 'chartCanvasUserProj', 'User Portfolio 10-Year Projection');
+    });
+
+    function parseWeightsTextarea() {
+      const raw = weightsTextarea.value.trim();
+      if (!raw) {
+        alert("Please paste weights (comma-separated) first.");
+        return null;
+      }
+      const parts = raw.split(',').map(v => parseFloat(v.trim()));
+      if (parts.length !== stockNames.length) {
+        alert(`Number of weights (${parts.length}) does not match number of stocks (${stockNames.length}).`);
+        return null;
+      }
+      for (let w of parts) {
+        if (isNaN(w)) {
+          alert("Invalid weight detected.");
+          return null;
+        }
+      }
+      return parts;
+    }
+
+    function portfolioReturn(weights) {
+      let total = 0;
+      for (let i = 0; i < weights.length; i++) {
+        total += weights[i] * meanReturns[i];
+      }
+      return total;
+    }
+
+    function portfolioVariance(weights) {
+      let pVar = 0;
+      for (let i = 0; i < weights.length; i++) {
+        for (let j = 0; j < weights.length; j++) {
+          pVar += weights[i] * weights[j] * covMatrix[i][j];
+        }
+      }
+      return pVar;
+    }
+
+    // ---------------------------
+    // 3) 10-Year Monte Carlo Simulation (Monthly compounding)
+    // ---------------------------
+    function runMonteCarlo10YearSimulation(initialCapital, monthlyMean, monthlyStd, trials = 10000) {
+      const periods = 120; // 10 years of monthly periods
+      let simulationResults = []; // each trial: an array of portfolio values over time
+      for (let t = 0; t < trials; t++) {
+        let values = [];
+        let currentValue = initialCapital;
+        values.push(currentValue);
+        for (let m = 1; m <= periods; m++) {
+          let r = monthlyMean + boxMullerRandom() * monthlyStd;
+          currentValue = currentValue * (1 + r);
+          values.push(currentValue);
+        }
+        simulationResults.push(values);
+      }
+      // Calculate mean, 5th, and 95th percentiles at each time step
+      let meanSeries = [];
+      let p5Series = [];
+      let p95Series = [];
+      let timeAxis = [];
+      for (let m = 0; m <= periods; m++) {
+        let arr = simulationResults.map(trial => trial[m]);
+        arr.sort((a, b) => a - b);
+        let meanVal = average(arr);
+        let p5Val = percentile(arr, 5);
+        let p95Val = percentile(arr, 95);
+        meanSeries.push(meanVal);
+        p5Series.push(p5Val);
+        p95Series.push(p95Val);
+        timeAxis.push((m / 12).toFixed(2));  // time in years
+      }
+      return { xAxis: timeAxis, meanSeries, p5Series, p95Series };
+    }
+
+    // ---------------------------
+    // 4) Plot Projection Line Chart
+    // ---------------------------
+    function plotProjectionLineChart(projectionData, canvasId, chartTitle) {
+      const ctx = document.getElementById(canvasId).getContext('2d');
+      let chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: projectionData.xAxis,
+          datasets: [
+            {
+              label: 'Mean',
+              data: projectionData.meanSeries,
+              borderColor: 'blue',
+              fill: false
+            },
+            {
+              label: '5th Percentile',
+              data: projectionData.p5Series,
+              borderColor: 'red',
+              fill: false
+            },
+            {
+              label: '95th Percentile',
+              data: projectionData.p95Series,
+              borderColor: 'green',
+              fill: false
+            }
+          ]
+        },
+        options: {
+          responsive: false,
+          plugins: {
+            legend: { position: 'top' },
+            title: { display: true, text: chartTitle }
+          },
+          scales: {
+            x: { title: { display: true, text: 'Years' } },
+            y: { title: { display: true, text: 'Portfolio Value ($)' } }
+          }
+        }
+      });
+      return chart;
+    }
+
+    // ---------------------------
+    // 5) Optimization (Random Search) & 10-Year Projection for Optimal Portfolio
+    // ---------------------------
+    runOptimizationBtn.addEventListener('click', () => {
+      const numRandom = parseInt(numRandomPortfoliosEl.value, 10) || 10000;
+      const rf = parseFloat(riskFreeRateEl.value) || 0;
+      if (numRandom <= 0) {
+        alert("Number of random portfolios must be > 0.");
+        return;
+      }
+      let randomResults = [];
+      let bestMinVar = Infinity;
+      let bestMinVarWeights = null;
+      let bestMaxSharpe = -Infinity;
+      let bestMaxSharpeWeights = null;
+      for (let n = 0; n < numRandom; n++) {
+        const w = randomWeights(stockNames.length);
+        const ret = portfolioReturn(w);
+        const var_ = portfolioVariance(w);
+        const std_ = Math.sqrt(var_);
+        const sr = (ret - rf) / (std_ || 1e-9);
+        randomResults.push({ ret, std: std_, weights: w });
+        if (var_ < bestMinVar) {
+          bestMinVar = var_;
+          bestMinVarWeights = w;
+        }
+        if (sr > bestMaxSharpe) {
+          bestMaxSharpe = sr;
+          bestMaxSharpeWeights = w;
+        }
+      }
+      // Stats for min variance portfolio
+      const minVarRet = portfolioReturn(bestMinVarWeights);
+      const minVarStd = Math.sqrt(bestMinVar);
+      const minVarSharpe = (minVarRet - rf) / (minVarStd || 1e-9);
+      // Stats for max Sharpe portfolio
+      const maxSharpeRet = portfolioReturn(bestMaxSharpeWeights);
+      const maxSharpeVar = portfolioVariance(bestMaxSharpeWeights);
+      const maxSharpeStd = Math.sqrt(maxSharpeVar);
+      let msg = `Minimum Variance Portfolio:\n`;
+      bestMinVarWeights.forEach((w, i) => {
+        msg += `  ${stockNames[i]}: ${w.toFixed(4)}\n`;
+      });
+      msg += `  Return: ${minVarRet.toFixed(4)}\n`;
+      msg += `  Std Dev: ${minVarStd.toFixed(4)}\n`;
+      msg += `  Variance: ${bestMinVar.toFixed(6)}\n`;
+      msg += `  Sharpe: ${minVarSharpe.toFixed(4)}\n\n`;
+      msg += `Maximum Sharpe Portfolio:\n`;
+      bestMaxSharpeWeights.forEach((w, i) => {
+        msg += `  ${stockNames[i]}: ${w.toFixed(4)}\n`;
+      });
+      msg += `  Return: ${maxSharpeRet.toFixed(4)}\n`;
+      msg += `  Std Dev: ${maxSharpeStd.toFixed(4)}\n`;
+      msg += `  Variance: ${maxSharpeVar.toFixed(6)}\n`;
+      msg += `  Sharpe: ${bestMaxSharpe.toFixed(4)}\n`;
+      // Run 10-year projection for the max Sharpe portfolio
+      const optimalProjection = runMonteCarlo10YearSimulation(1_000_000, maxSharpeRet, maxSharpeStd, 10000);
+      if (optimalProjChart) optimalProjChart.destroy();
+      optimalProjChart = plotProjectionLineChart(optimalProjection, 'chartCanvasOptimalProj', 'Max Sharpe Portfolio 10-Year Projection');
+      optimizationOutput.textContent = msg;
+      // Also plot the efficient frontier scatter chart (unchanged)
+      randomResults.sort((a, b) => a.std - b.std);
+      let frontierPoints = [];
+      let currentMaxRet = -Infinity;
+      for (let pt of randomResults) {
+        if (pt.ret > currentMaxRet) {
+          currentMaxRet = pt.ret;
+          frontierPoints.push({ std: pt.std, ret: pt.ret });
+        }
+      }
+      plotFrontier(randomResults, frontierPoints);
+    });
+
+    function randomWeights(n) {
+      let arr = [];
+      let sum = 0;
+      for (let i = 0; i < n; i++) {
+        arr[i] = Math.random();
+        sum += arr[i];
+      }
+      for (let i = 0; i < n; i++) {
+        arr[i] /= sum;
+      }
+      return arr;
+    }
+
+    // ---------------------------
+    // Utility Functions
+    // ---------------------------
+    function boxMullerRandom() {
+      let u = 0, v = 0;
+      while (u === 0) u = Math.random();
+      while (v === 0) v = Math.random();
+      return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+    }
+
+    function average(arr) {
+      return arr.reduce((acc, val) => acc + val, 0) / arr.length;
+    }
+
+    function percentile(arr, p) {
+      const idx = Math.floor((p / 100) * arr.length);
+      return arr[Math.min(idx, arr.length - 1)];
+    }
+
+    // ---------------------------
+    // 6) Plot Frontier Scatter Chart (unchanged)
+    // ---------------------------
+    function plotFrontier(randomResults, frontierPoints) {
+      const allPointsData = randomResults.map(pt => ({ x: pt.std, y: pt.ret }));
+      const frontierData = frontierPoints.map(pt => ({ x: pt.std, y: pt.ret }));
+      const ctx = document.getElementById('chartCanvas').getContext('2d');
+      if (frontierChart) frontierChart.destroy();
+      frontierChart = new Chart(ctx, {
+        type: 'scatter',
+        data: {
+          datasets: [
+            {
+              label: 'Random Portfolios',
+              data: allPointsData,
+              backgroundColor: 'rgba(100,100,100,0.5)',
+              pointRadius: 2
+            },
+            {
+              label: 'Efficient Frontier',
+              data: frontierData,
+              borderColor: 'red',
+              backgroundColor: 'red',
+              showLine: true,
+              fill: false,
+              pointRadius: 4
+            }
+          ]
+        },
+        options: {
+          responsive: false,
+          scales: {
+            x: {
+              type: 'linear',
+              position: 'bottom',
+              title: { display: true, text: 'Std Dev' }
+            },
+            y: { title: { display: true, text: 'Return' } }
+          },
+          plugins: { legend: { position: 'top' } }
+        }
+      });
+    }
+  </script>
+</body>
+</html>
